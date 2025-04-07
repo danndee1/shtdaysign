@@ -387,7 +387,7 @@ def main():
         # 获取对应的代理
         proxy = os.getenv(f'DEAULT_PROXY_{fetch_index}', None)
         if proxy:
-            proxies = {'http://': proxy, 'https://': proxy}
+            proxies = {'http': proxy, 'https': proxy}  # 正确的格式是没有斜杠的
             print(f"Using proxy for FETCH_98TANG_{fetch_index}: {proxies}")
         else:
             proxies = None
