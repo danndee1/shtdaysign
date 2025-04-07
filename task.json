@@ -1,0 +1,18 @@
+{
+    "name": "sht自动签到评论",
+    "author": "Tutu",
+    "cron": "0 0 * * *",
+    "command": "python3",
+    "schedule": [
+        {
+            "name": "每日签到",
+            "command": "python3 daysignMulti.py",
+            "schedule": "30 8 * * *"
+        },
+        {
+            "name": "每日评论",
+            "command": "python3 dayCommentMulti.py",
+            "schedule": "30 9,10 * * *"
+        }
+    ]
+} 
