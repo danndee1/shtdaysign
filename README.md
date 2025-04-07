@@ -38,6 +38,7 @@
    - 切换到 "Python" 分类
    - 点击 "添加依赖"
    - 分别添加：httpx、beautifulsoup4、flaresolverr
+   - 如果装完依赖还是运行报错，则安装requirements.txt里的所有依赖
 
 2. 环境变量配置：
    - 进入青龙面板 -> 环境变量
