@@ -5,11 +5,21 @@ import httpx
 import traceback
 import random
 import math
-from datetime import datetime, timedelta  # 正确导入 datetime 和 timedelta
+import configparser
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 from bs4 import BeautifulSoup
 from xml.etree import ElementTree as ET
 from flaresolverr import FlareSolverrHTTPClient
+
+# 加载配置文件
+config = configparser.ConfigParser()
+config.read('config.ini', encoding='utf-8')
+
+# 获取代理池配置
+proxy_pool = [proxy.strip() for proxy in config.get('proxy_pool', 'proxies').split('\n') if proxy.strip()]
+max_retries = config.getint('retry', 'max_retries')
+retry_delay = config.getint('retry', 'retry_delay')
 
 SEHUATANG_HOST = 'www.sehuatang.net'
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
@@ -71,222 +81,287 @@ AUTO_REPLIES = (
 )
 
 
+def get_random_proxy():
+    """从代理池中随机获取一个代理"""
+    if not proxy_pool:
+        return None
+    return random.choice(proxy_pool)
+
+def create_proxy_dict(proxy_url):
+    """创建代理字典"""
+    if not proxy_url:
+        return None
+    return {
+        'http': proxy_url,
+        'https': proxy_url
+    }
+
 def daysign(
     cookies: dict,
     flaresolverr_url: str = None,
     flaresolverr_proxy: str = None,
     proxies: dict = None  # 新增的 proxies 参数，用于传入代理配置
 ) -> str:
-   # 如果传入了代理，则输出使用的代理
+    current_proxy = None
+    used_proxies = set()  # 记录已使用的代理
+    
+    # 如果传入了代理，则使用环境变量代理
     if proxies:
-        print(f"Using proxy: {proxies}")
+        print(f"使用环境变量代理: {proxies}")
+        current_proxy = proxies
     else:
-        print("No proxy configured.")
+        # 从代理池中随机选择一个代理
+        proxy_url = get_random_proxy()
+        if proxy_url:
+            current_proxy = create_proxy_dict(proxy_url)
+            print(f"使用代理池代理: {current_proxy}")
+            used_proxies.add(proxy_url)
 
-    with (FlareSolverrHTTPClient(url=flaresolverr_url,
-                                 proxy=flaresolverr_proxy,
-                                 cookies=cookies,
-                                 http2=True)
-          if flaresolverr_url else httpx.Client(cookies=cookies, http2=True, proxies=proxies)) as client:
+    for retry in range(max_retries):
+        try:
+            client = (FlareSolverrHTTPClient(url=flaresolverr_url,
+                                     proxy=flaresolverr_proxy,
+                                     cookies=cookies,
+                                     http2=True)
+                if flaresolverr_url else httpx.Client(cookies=cookies, http2=True, proxies=current_proxy))
 
-        @contextmanager
-        def _request(method, url, *args, **kwargs):
-            r = client.request(method=method, url=url,
-                               headers={
-                                   'user-agent': DEFAULT_USER_AGENT,
-                                   'x-requested-with': 'XMLHttpRequest',
-                                   'dnt': '1',
-                                   'accept': '*/*',
-                                   'sec-ch-ua-mobile': '?0',
-                                   'sec-ch-ua-platform': 'macOS',
-                                   'sec-fetch-site': 'same-origin',
-                                   'sec-fetch-mode': 'cors',
-                                   'sec-fetch-dest': 'empty',
-                                   'referer': f'https://{SEHUATANG_HOST}/plugin.php?id=dd_sign&mod=sign',
-                                   'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-                               }, *args, **kwargs)
-            try:
-                r.raise_for_status()
-                yield r
-            finally:
-                r.close()
+            @contextmanager
+            def _request(method, url, *args, **kwargs):
+                r = client.request(method=method, url=url,
+                                   headers={
+                                       'user-agent': DEFAULT_USER_AGENT,
+                                       'x-requested-with': 'XMLHttpRequest',
+                                       'dnt': '1',
+                                       'accept': '*/*',
+                                       'sec-ch-ua-mobile': '?0',
+                                       'sec-ch-ua-platform': 'macOS',
+                                       'sec-fetch-site': 'same-origin',
+                                       'sec-fetch-mode': 'cors',
+                                       'sec-fetch-dest': 'empty',
+                                       'referer': f'https://{SEHUATANG_HOST}/plugin.php?id=dd_sign&mod=sign',
+                                       'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+                                   }, *args, **kwargs)
+                try:
+                    r.raise_for_status()
+                    yield r
+                finally:
+                    r.close()
 
-        age_confirmed = False
-        age_retry_cnt = 3
-        while not age_confirmed and age_retry_cnt > 0:
-            with _request(method='get', url=f'https://{SEHUATANG_HOST}/') as r:
-                if (v := re.findall(r"safeid='(\w+)'",
-                                    r.text, re.MULTILINE | re.IGNORECASE)) and (safeid := v[0]):
-                    print(f'set age confirm cookie: _safe={safeid}')
-                    client.cookies.set(name='_safe', value=safeid)
-                else:
-                    age_confirmed = True
-                age_retry_cnt -= 1
+            with client:
+                age_confirmed = False
+                age_retry_cnt = 3
+                while not age_confirmed and age_retry_cnt > 0:
+                    with _request(method='get', url=f'https://{SEHUATANG_HOST}/') as r:
+                        if (v := re.findall(r"safeid='(\w+)'",
+                                            r.text, re.MULTILINE | re.IGNORECASE)) and (safeid := v[0]):
+                            print(f'set age confirm cookie: _safe={safeid}')
+                            client.cookies.set(name='_safe', value=safeid)
+                        else:
+                            age_confirmed = True
+                        age_retry_cnt -= 1
 
-        if not age_confirmed:
-            raise Exception('failed to pass age confirmation')
+                if not age_confirmed:
+                    raise Exception('failed to pass age confirmation')
 
-        # 随机等待
-        wait_time = random.randint(4, 10)
-        print(f'在选择题目之前等待 {wait_time} 秒...')
-        time.sleep(wait_time)
-        # 随机等待
+                # 随机等待
+                wait_time = random.randint(4, 10)
+                print(f'在选择题目之前等待 {wait_time} 秒...')
+                time.sleep(wait_time)
+                # 随机等待
 
-        with _request(method='get', url=f'https://{SEHUATANG_HOST}/forum.php?mod=forumdisplay&fid={FID}') as r:
-            tids = re.findall(r"normalthread_(\d+)", r.text,
-                              re.MULTILINE | re.IGNORECASE)
-            tid = random.choice(tids)
-            print(f'choose tid = {tid} to comment')
+                with _request(method='get', url=f'https://{SEHUATANG_HOST}/forum.php?mod=forumdisplay&fid={FID}') as r:
+                    tids = re.findall(r"normalthread_(\d+)", r.text,
+                                      re.MULTILINE | re.IGNORECASE)
+                    tid = random.choice(tids)
+                    print(f'choose tid = {tid} to comment')
 
-        # 随机等待
-        wait_time = random.randint(4, 10)
-        print(f'随机等待 {wait_time} 秒...')
-        time.sleep(wait_time)
-        # 随机等待
+                # 随机等待
+                wait_time = random.randint(4, 10)
+                print(f'随机等待 {wait_time} 秒...')
+                time.sleep(wait_time)
+                # 随机等待
 
-        with _request(method='get', url=f'https://{SEHUATANG_HOST}/forum.php?mod=viewthread&tid={tid}&extra=page%3D1') as r:
-            soup = BeautifulSoup(r.text, 'html.parser')
-            formhash = soup.find('input', {'name': 'formhash'})['value']
+                with _request(method='get', url=f'https://{SEHUATANG_HOST}/forum.php?mod=viewthread&tid={tid}&extra=page%3D1') as r:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    formhash = soup.find('input', {'name': 'formhash'})['value']
 
-        message = random.choice(AUTO_REPLIES)
+                message = random.choice(AUTO_REPLIES)
 
-        # 随机等待
-        wait_time = random.randint(3, 10)
-        print(f'随机等待 {wait_time} 秒...')
-        time.sleep(wait_time)
-        # 随机等待
-        with _request(method='post', url=f'https://{SEHUATANG_HOST}/forum.php?mod=post&action=reply&fid={FID}&tid={tid}&extra=page%3D1&replysubmit=yes&infloat=yes&handlekey=fastpost&inajax=1',
-                      data={
-                          'file': '',
-                          'message': message,
-                          'posttime': int(time.time()),
-                          'formhash': formhash,
-                          'usesig': '',
-                          'subject': '',
-                      }) as r:
-            print(f'comment to: tid = {tid}, message = {message}')
+                # 随机等待
+                wait_time = random.randint(3, 10)
+                print(f'随机等待 {wait_time} 秒...')
+                time.sleep(wait_time)
+                # 随机等待
+                with _request(method='post', url=f'https://{SEHUATANG_HOST}/forum.php?mod=post&action=reply&fid={FID}&tid={tid}&extra=page%3D1&replysubmit=yes&infloat=yes&handlekey=fastpost&inajax=1',
+                              data={
+                                  'file': '',
+                                  'message': message,
+                                  'posttime': int(time.time()),
+                                  'formhash': formhash,
+                                  'usesig': '',
+                                  'subject': '',
+                              }) as r:
+                    print(f'comment to: tid = {tid}, message = {message}')
 
-        with _request(method='get', url=f'https://{SEHUATANG_HOST}/plugin.php?id=dd_sign&mod=sign') as r:
-            # id_hash_rsl = re.findall(
-            #     r"updatesecqaa\('(.*?)'", r.text, re.MULTILINE | re.IGNORECASE)
-            # id_hash = id_hash_rsl[0] if id_hash_rsl else 'qS0'  # default value
+                with _request(method='get', url=f'https://{SEHUATANG_HOST}/plugin.php?id=dd_sign&mod=sign') as r:
+                    # id_hash_rsl = re.findall(
+                    #     r"updatesecqaa\('(.*?)'", r.text, re.MULTILINE | re.IGNORECASE)
+                    # id_hash = id_hash_rsl[0] if id_hash_rsl else 'qS0'  # default value
 
-            # soup = BeautifulSoup(r.text, 'html.parser')
-            # formhash = soup.find('input', {'name': 'formhash'})['value']
-            # signtoken = soup.find('input', {'name': 'signtoken'})['value']
-            # action = soup.find('form', {'name': 'login'})['action']
-            pass
-        #获取个人账号名
-        # 随机等待
-        wait_time = random.randint(1, 3)
-        print(f'随机等待 {wait_time} 秒...')
-        time.sleep(wait_time)
-        # 随机等待
-        with _request(method='get', url=f'https://{SEHUATANG_HOST}/home.php?mod=spacecp&ac=profile') as r:
-            soup = BeautifulSoup(r.text, 'html.parser')
-        
-            # 查找标签
-            username_element = soup.find('strong', class_='vwmy')
+                    # soup = BeautifulSoup(r.text, 'html.parser')
+                    # formhash = soup.find('input', {'name': 'formhash'})['value']
+                    # signtoken = soup.find('input', {'name': 'signtoken'})['value']
+                    # action = soup.find('form', {'name': 'login'})['action']
+                    pass
+                #获取个人账号名
+                # 随机等待
+                wait_time = random.randint(1, 3)
+                print(f'随机等待 {wait_time} 秒...')
+                time.sleep(wait_time)
+                # 随机等待
+                with _request(method='get', url=f'https://{SEHUATANG_HOST}/home.php?mod=spacecp&ac=profile') as r:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    
+                    # 查找标签
+                    username_element = soup.find('strong', class_='vwmy')
 
-            # 提取用户信息
-            if username_element:
-                username = username_element.text
-                # 掩码处理：保留首字母和最后一字母，其他部分用星号代替
-                def mask_username(username):
-                    if len(username) <= 2:
-                        # 如果用户名只有一两位，掩码一半或完全掩盖
-                        return username[0] + '*' * (len(username) - 1)
+                    # 提取用户信息
+                    if username_element:
+                        username = username_element.text
+                        # 掩码处理：保留首字母和最后一字母，其他部分用星号代替
+                        def mask_username(username):
+                            if len(username) <= 2:
+                                # 如果用户名只有一两位，掩码一半或完全掩盖
+                                return username[0] + '*' * (len(username) - 1)
+                            else:
+                                return username[0] + '*' * (len(username) - 2) + username[-1]
+
+                        masked_username = mask_username(username)
+                        print(f"用户名: {masked_username}")
                     else:
-                        return username[0] + '*' * (len(username) - 2) + username[-1]
+                        print("未找到用户名")
 
-                masked_username = mask_username(username)
-                print(f"用户名: {masked_username}")
-            else:
-                print("未找到用户名")
+                    # 输出结果
+                    output = f"🙋‍♂️用户名: {masked_username} \n"
+                #获取金币等信息
+                # 随机等待
+                wait_time = random.randint(1, 3)
+                print(f'随机等待 {wait_time} 秒...')
+                time.sleep(wait_time)
+                # 随机等待
+                with _request(method='get', url=f'https://{SEHUATANG_HOST}/home.php?mod=spacecp&ac=credit&showcredit=1') as r:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                   
+                    # 查找所有带有 <li> 标签的积分信息
 
-            # 输出结果
-            output = f"🙋‍♂️用户名: {masked_username} \n"
-        #获取金币等信息
-        # 随机等待
-        wait_time = random.randint(1, 3)
-        print(f'随机等待 {wait_time} 秒...')
-        time.sleep(wait_time)
-        # 随机等待
-        with _request(method='get', url=f'https://{SEHUATANG_HOST}/home.php?mod=spacecp&ac=credit&showcredit=1') as r:
-            soup = BeautifulSoup(r.text, 'html.parser')
-           
-            # 查找所有带有 <li> 标签的积分信息
+                    credit_info = soup.find_all('li')
 
-            credit_info = soup.find_all('li')
+                    # 提取积分和金钱等信息
+                    credits = {}
+                    first_integral_found = False
+                    for item in credit_info:
+                        if item.find('em'):  # 检查是否有 <em> 标签
+                            key = item.find('em').text.strip().replace(':', '')
+                            value = item.text.split(":")[-1].strip()
+                            if key == "积分" and not first_integral_found:
+                                credits[key] = value
+                                first_integral_found = True
+                            elif key!= "积分":
+                                credits[key] = value
 
-            # 提取积分和金钱等信息
-            credits = {}
-            first_integral_found = False
-            for item in credit_info:
-                if item.find('em'):  # 检查是否有 <em> 标签
-                    key = item.find('em').text.strip().replace(':', '')
-                    value = item.text.split(":")[-1].strip()
-                    if key == "积分" and not first_integral_found:
-                        credits[key] = value
-                        first_integral_found = True
-                    elif key!= "积分":
-                        credits[key] = value
+                    # 获取用户组信息
+                    user_group_tag = soup.find('a', {'id': 'g_upmine'})
+                    user_group = user_group_tag.text.split(":")[-1].strip() if user_group_tag else '未找到'
 
-            # 获取用户组信息
-            user_group_tag = soup.find('a', {'id': 'g_upmine'})
-            user_group = user_group_tag.text.split(":")[-1].strip() if user_group_tag else '未找到'
+                    # 获取各类积分信息，并进行输出格式化
+                    gold = credits.get('金钱', '未找到')
+                    points = credits.get('积分', '未找到')
+                    coins = credits.get('色币', '未找到')
+                    ratings = credits.get('评分', '未找到')
 
-            # 获取各类积分信息，并进行输出格式化
-            gold = credits.get('金钱', '未找到')
-            points = credits.get('积分', '未找到')
-            coins = credits.get('色币', '未找到')
-            ratings = credits.get('评分', '未找到')
+                    # 输出结果
+                    output += f"🤼‍♂️用户组：{user_group} \n💰金币：{gold}\n💯积分：{points}\n😍色币：{coins}\n🔥评分：{ratings}\n"
+                #获取升级详情
+                # 随机等待
+                wait_time = random.randint(1, 3)
+                print(f'随机等待 {wait_time} 秒...')
+                time.sleep(wait_time)
+                # 随机等待
+                with _request(method='get', url=f'https://{SEHUATANG_HOST}/home.php?mod=spacecp&ac=usergroup') as r:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    # 获取晋级用户组信息
+                    upgrade_usergroup = soup.find('li', {'id': 'c2'}).text
+                    #print("晋级用户组信息:", upgrade_usergroup)
 
-            # 输出结果
-            output += f"🤼‍♂️用户组：{user_group} \n💰金币：{gold}\n🥇积分：{points}\n😍色币：{coins}\n🔥评分：{ratings}\n"
-        #获取升级详情
-        # 随机等待
-        wait_time = random.randint(1, 3)
-        print(f'随机等待 {wait_time} 秒...')
-        time.sleep(wait_time)
-        # 随机等待
-        with _request(method='get', url=f'https://{SEHUATANG_HOST}/home.php?mod=spacecp&ac=usergroup') as r:
-            soup = BeautifulSoup(r.text, 'html.parser')
-            # 获取晋级用户组信息
-            upgrade_usergroup = soup.find('li', {'id': 'c2'}).text
-            #print("晋级用户组信息:", upgrade_usergroup)
+                    # 查找包含晋级用户组信息的div
+                    tscr_div = soup.find('div', class_='tscr')
 
-            # 查找包含晋级用户组信息的div
-            tscr_div = soup.find('div', class_='tscr')
+                    if tscr_div:
+                        # 提取升级所需积分信息
+                        required_points = tscr_div.find('span', class_='notice').text
+                        # 从文本中提取积分数字
+                        points_needed = int(required_points.split('积分')[1].strip())
 
-            if tscr_div:
-                # 提取升级所需积分信息
-                required_points = tscr_div.find('span', class_='notice').text
-                # 从文本中提取积分数字
-                points_needed = int(required_points.split('积分')[1].strip())
+                        # 计算预计升级时间
+                        points_per_day = 3
+                        days_needed = points_needed / points_per_day
 
-                # 计算预计升级时间
-                points_per_day = 3
-                days_needed = points_needed / points_per_day
+                        # 手动向上取整
+                        if days_needed != int(days_needed):
+                            days_needed_ceil = int(days_needed) + 1
+                        else:
+                            days_needed_ceil = int(days_needed)
 
-                # 手动向上取整
-                if days_needed != int(days_needed):
-                    days_needed_ceil = int(days_needed) + 1
+                        # 计算预计升级日期
+                        today = datetime.now()
+                        todayDate = today.date()  
+                        upgrade_date = todayDate + timedelta(days=days_needed_ceil)
+                    else:
+                        print("未找到包含晋级用户组信息的 div。")
+
+                    # 输出结果
+                    output += f"\n{upgrade_usergroup} \n{required_points}\n"
+                    output += f"预计还需{days_needed_ceil}天\n"
+                    output += f"预计升级时间: {upgrade_date}"
+                return output
+
+        except httpx.ProxyError as e:
+            print(f"代理错误: {str(e)}")
+            if current_proxy:
+                print(f"当前代理 {current_proxy} 不可用，尝试切换代理...")
+                # 尝试使用新的代理
+                available_proxies = [p for p in proxy_pool if p not in used_proxies]
+                if available_proxies:
+                    proxy_url = random.choice(available_proxies)
+                    current_proxy = create_proxy_dict(proxy_url)
+                    used_proxies.add(proxy_url)
+                    print(f"切换到新代理: {current_proxy}")
+                    time.sleep(retry_delay)
+                    continue
                 else:
-                    days_needed_ceil = int(days_needed)
-
-                # 计算预计升级日期
-                today = datetime.now()
-                todayDate = today.date()  
-                upgrade_date = todayDate + timedelta(days=days_needed_ceil)
+                    print("所有代理都已尝试过，无法继续")
+                    raise Exception("所有代理都不可用")
             else:
-                print("未找到包含晋级用户组信息的 div。")
+                raise Exception(f"代理错误: {str(e)}")
 
-            # 输出结果
-            output += f"\n{upgrade_usergroup} \n{required_points}\n"
-            output += f"预计还需{days_needed_ceil}天\n"
-            output += f"预计升级时间: {upgrade_date}"
-        return output
+        except httpx.RequestError as e:
+            print(f"请求错误: {str(e)}")
+            if retry < max_retries - 1:
+                print(f"等待 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                raise Exception(f"请求错误: {str(e)}")
+
+        except Exception as e:
+            print(f"未知错误: {str(e)}")
+            traceback.print_exc()
+            if retry < max_retries - 1:
+                print(f"等待 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                raise Exception(f"未知错误: {str(e)}")
 
 def retrieve_cookies_from_curl(env: str) -> dict:
     cURL = os.getenv(env, '').replace('\\', ' ')
@@ -348,47 +423,44 @@ def push_notification(title: str, content: str) -> None:
 
 def main():
     raw_html = None
-    results = []  # 用于存储所有签到结果
+    results = []  # 用于存储所有评论结果
 
     # 遍历多个 FETCH_98TANG 环境变量
     fetch_index = 1
     while os.getenv(f'FETCH_98TANG_{fetch_index}'):
-        # 获取 cookies
-        cookies = retrieve_cookies_from_fetch(f'FETCH_98TANG_{fetch_index}')
-        
-        # 获取对应的代理
-        proxy = os.getenv(f'DEAULT_PROXY_{fetch_index}', None)
-        if proxy:
-            proxies = {'http': proxy, 'https': proxy}  # 正确的格式是没有斜杠的
-            print(f"Using proxy for FETCH_98TANG_{fetch_index}: {proxies}")
-        else:
-            proxies = None
-            print(f"No proxy configured for FETCH_98TANG_{fetch_index}")
-
         try:
-            # 执行签到，并传递代理信息
+            # 获取 cookies
+            cookies = retrieve_cookies_from_fetch(f'FETCH_98TANG_{fetch_index}')
+            
+            # 获取对应的代理
+            proxy = os.getenv(f'DEAULT_PROXY_{fetch_index}', None)
+            if proxy:
+                proxies = {'http': proxy, 'https': proxy}
+                print(f"账号 {fetch_index} 使用环境变量代理: {proxies}")
+            else:
+                proxies = None
+                # 移除错误提示，直接使用代理池
+                print(f"账号 {fetch_index} 使用代理池")
+
+            # 执行评论，并传递代理信息
             raw_html = daysign(
                 cookies=cookies,
                 flaresolverr_url=os.getenv('FLARESOLVERR_URL'),
                 flaresolverr_proxy=os.getenv('FLARESOLVERR_PROXY'),
-                proxies=proxies  # 将代理传递给 daysign 函数
+                proxies=proxies
             )
 
-            # 解析签到结果
             if '积分' in raw_html:
                 title = f'第{fetch_index}个账号 积分详情\n'
                 message_text = raw_html
             else:
                 title = f'第{fetch_index}个账号 评论异常'
                 message_text = raw_html
-        except IndexError:
-            title = f'第{fetch_index}个账号 评论异常'
-            message_text = f'正则匹配错误'
-        except Exception as e:
 
+        except Exception as e:
             title = f'第{fetch_index}个账号 评论异常'
-            message_text = f'错误原因：{e}'
-            traceback.print_exc()
+            message_text = f'错误原因：{str(e)}\n详细错误信息：{traceback.format_exc()}'
+            print(f"账号 {fetch_index} 评论失败: {message_text}")
 
         # 处理并保存结果
         message_text = preprocess_text(message_text)
