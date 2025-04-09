@@ -20,6 +20,9 @@
 可选的环境变量：
 - `DEAULT_PROXY_1`, `DEAULT_PROXY_2`, ... - 代理配置
   - 格式如：`http://user:pass@host:port` 或 `socks5://host:port`
+ 
+## 代理池配置
+- 打开`config.ini`将里面的代理换成自己代理即可
 
 ## fetch获取说明
 1. [点击这里](https://www.sehuatang.net/plugin.php?id=dd_sign&view=daysign)
