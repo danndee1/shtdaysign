@@ -52,11 +52,11 @@
    - 添加两个任务：
      ```
      名称: 每日签到
-     命令: python3 daysignMulti.py
+     命令: task daysignMulti.py
      定时: 随机时间，如 30 8 * * *（每天8:30执行）
      
      名称: 每日评论
-     命令: python3 dayCommentMulti.py
+     命令: task dayCommentMulti.py
      定时: 随机时间，如 30 9,10 * * *（每天9:30 10:30执行）
      ```
 
@@ -77,4 +77,5 @@
 1. 请确保环境变量配置正确
 2. 建议两个脚本的执行时间错开
 3. 如果遇到 Cloudflare 验证，需要配置 FlareSolverr 服务
-4. 确保青龙面板的通知功能已正确配置 
+4. 确保青龙面板的通知功能已正确配置
+5. 代理池功能优先级小于环境变量代理功能 
